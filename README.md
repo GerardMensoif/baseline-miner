@@ -5,7 +5,7 @@ Open source Stratum miner for Baseline pools, optimized for CPU throughput with 
 ## Features
 - Baseline Stratum client (subscribe/authorize/notify)
 - Multi-process SHA256d miner (one worker per process)
-- Portable C SHA256d backend (always used; no CPU-specific intrinsics)
+- C SHA256d backend (portable by default; optimized scan path)
 - Vardiff `mining.set_difficulty` support
 - Clean job handling and share validation
 
@@ -19,6 +19,24 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -e .
 ```
+
+### Optional: CPU-specific build flags
+By default the extension is built in a portable mode (safe to run on other machines).
+
+To squeeze extra performance on the machine you build on, set `BASELINE_MINER_NATIVE=1` to enable CPU-specific compiler flags:
+
+PowerShell (Windows):
+```
+$env:BASELINE_MINER_NATIVE="1"
+pip install -e .
+```
+
+bash/zsh (Linux/macOS):
+```
+BASELINE_MINER_NATIVE=1 pip install -e .
+```
+
+Note: CPU-specific builds may crash with `Illegal instruction` if you copy the wheel to an older CPU.
 
 ## Usage
 ```
