@@ -38,8 +38,8 @@ def _build_header_prefix(job: MiningJob, *, extranonce2: int, extranonce2_size: 
     coinbase = job.coinb1 + job.extranonce1 + extranonce2_bytes + job.coinb2
     coinbase_hash = sha256d(coinbase)
     merkle_root = _merkle_root(coinbase_hash, job.merkle_branches_le)
-    # Block headers serialize the merkle root in little-endian.
-    return version_le + job.prev_hash_le + merkle_root[::-1] + ntime.to_bytes(4, "little") + bits_le
+    # Baseline node uses big-endian digest bytes for header merkle root / prev_hash fields.
+    return version_le + job.prev_hash_le + merkle_root + ntime.to_bytes(4, "little") + bits_le
 
 
 def _worker_main(
@@ -186,6 +186,8 @@ class Miner:
         self.hash_counters: list[mp.Value] = []
         self.current_job_id: str | None = None
         self.job_seq: int = 0
+        self.difficulty: float = 1.0
+        self.share_target: bytes = difficulty_to_target_bytes(self.difficulty)
 
     def start(self) -> None:
         if self.processes:
@@ -231,9 +233,22 @@ class Miner:
         for queue_item in self.job_queues:
             queue_item.put(("clear", None))
 
+    def _drain_shares(self) -> None:
+        while True:
+            try:
+                self.share_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def set_difficulty(self, difficulty: float) -> None:
+        previous = self.difficulty
+        self.difficulty = float(difficulty)
+        self.share_target = difficulty_to_target_bytes(self.difficulty)
         for queue_item in self.job_queues:
             queue_item.put(("diff", difficulty))
+        if self.difficulty > previous:
+            # Drop any queued shares mined at the old (easier) target.
+            self._drain_shares()
 
     def snapshot_hashes(self) -> int:
         total = 0
@@ -246,11 +261,7 @@ class Miner:
         if job.clean:
             self.clear_job()
             # Drop any shares computed for stale work.
-            while True:
-                try:
-                    self.share_queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._drain_shares()
         self.job_seq += 1
         self.current_job_id = job.job_id
         for queue_item in self.job_queues:

@@ -6,7 +6,7 @@ from baseline_miner.miner import _build_header_prefix, _merkle_root
 
 
 class MinerHeaderTests(unittest.TestCase):
-    def test_header_prefix_serializes_merkle_root_little_endian(self) -> None:
+    def test_header_prefix_serializes_merkle_root_big_endian(self) -> None:
         extranonce1 = bytes.fromhex("aabbccdd")
         extranonce2 = 0x1
         extranonce2_size = 4
@@ -40,9 +40,8 @@ class MinerHeaderTests(unittest.TestCase):
         merkle_root_be = _merkle_root(sha256d(coinbase), [branch])
 
         self.assertEqual(len(header_prefix), 76)
-        self.assertEqual(header_prefix[36:68], merkle_root_be[::-1])
+        self.assertEqual(header_prefix[36:68], merkle_root_be)
 
 
 if __name__ == "__main__":
     unittest.main()
-

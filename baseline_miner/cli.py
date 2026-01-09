@@ -26,9 +26,8 @@ async def _share_sender(
     stats: dict[str, int],
     stop_event: asyncio.Event,
 ) -> None:
-    recent_keys: set[tuple[int, int, int]] = set()
-    recent_order: deque[tuple[int, int, int]] = deque()
-    recent_job_seq: int | None = None
+    recent_keys: set[tuple[str, int, int, int]] = set()
+    recent_order: deque[tuple[str, int, int, int]] = deque()
     max_recent = 50_000
 
     while client.connected and not stop_event.is_set():
@@ -38,14 +37,14 @@ async def _share_sender(
             continue
         if stop_event.is_set() or not client.connected:
             break
-        if miner.current_job_id and share.job_seq != miner.job_seq:
-            # Drop stale share from previous job.
-            continue
-        if recent_job_seq != share.job_seq:
-            recent_job_seq = share.job_seq
-            recent_keys.clear()
-            recent_order.clear()
-        key = (share.extranonce2, share.ntime, share.nonce)
+        if share.hash_hex:
+            # Server validates shares by recomputing the header hash and comparing
+            # against the current share target; drop any shares that don't meet
+            # our current difficulty (e.g. mined right before a vardiff increase).
+            digest_be = bytes.fromhex(share.hash_hex)[::-1]
+            if digest_be > miner.share_target:
+                continue
+        key = (share.job_id, share.extranonce2, share.ntime, share.nonce)
         if key in recent_keys:
             continue
         recent_keys.add(key)
@@ -98,6 +97,8 @@ async def run(args: argparse.Namespace) -> None:
     worker_name = _build_worker_name(args.address, args.worker)
     miner: Miner | None = None
     stats = {"accepted": 0, "rejected": 0, "blocks": 0}
+    latest_difficulty: float | None = None
+    latest_job: object | None = None
 
     stats_task: asyncio.Task | None = None
     client: StratumClient | None = None
@@ -105,8 +106,22 @@ async def run(args: argparse.Namespace) -> None:
     try:
         while not stop_event.is_set():
             client = StratumClient(args.host, args.port)
-            client.on_difficulty = lambda diff: miner and miner.set_difficulty(diff)
-            client.on_job = lambda job: miner and miner.set_job(job)
+            latest_difficulty = None
+            latest_job = None
+            def _on_difficulty(diff: float) -> None:
+                nonlocal latest_difficulty
+                latest_difficulty = diff
+                if miner:
+                    miner.set_difficulty(diff)
+
+            def _on_job(job) -> None:
+                nonlocal latest_job
+                latest_job = job
+                if miner:
+                    miner.set_job(job)
+
+            client.on_difficulty = _on_difficulty
+            client.on_job = _on_job
             share_task: asyncio.Task | None = None
             try:
                 await client.connect()
@@ -120,11 +135,15 @@ async def run(args: argparse.Namespace) -> None:
                         miner.stop()
                     miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
                     miner.start()
-                    if stats_task:
-                        stats_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await stats_task
-                    stats_task = asyncio.create_task(
+                if latest_difficulty is not None:
+                    miner.set_difficulty(latest_difficulty)
+                if latest_job is not None:
+                    miner.set_job(latest_job)
+                if stats_task:
+                    stats_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stats_task
+                stats_task = asyncio.create_task(
                         _stats_loop(miner, stats, args.stats_interval, stop_event),
                         name="miner-stats",
                     )

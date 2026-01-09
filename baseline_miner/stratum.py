@@ -171,10 +171,12 @@ class StratumClient:
                     try:
                         difficulty = float(params[0])
                     except (TypeError, ValueError):
+                        self.log.debug("Invalid difficulty from server")
                         continue
                     self.difficulty = difficulty
                     if self.on_difficulty:
                         self.on_difficulty(difficulty)
+                    self.log.info("Set mining difficulty to %.4f", difficulty)
                 elif method == "mining.notify":
                     job = self._parse_notify(params)
                     if job and self.on_job:
