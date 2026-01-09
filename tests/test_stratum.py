@@ -1,5 +1,6 @@
 import unittest
 
+from baseline_miner.job import Share
 from baseline_miner.stratum import StratumClient
 
 
@@ -29,6 +30,36 @@ class StratumParseTests(unittest.TestCase):
         self.assertEqual(job.bits, 0x207FFFFF)
         self.assertEqual(job.merkle_branches_le[0], branch)
         self.assertTrue(job.clean)
+
+
+class StratumSubmitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_share_formats_baseline_node_params(self) -> None:
+        client = StratumClient("127.0.0.1", 0)
+        captured: dict[str, object] = {}
+
+        async def fake_request(method: str, params: list[object]):
+            captured["method"] = method
+            captured["params"] = params
+            return True
+
+        client.request = fake_request  # type: ignore[method-assign]
+
+        share = Share(
+            job_id="job123",
+            extranonce2=0x1,
+            ntime=0x5F5E1000,
+            nonce=0x00ABCDEF,
+            is_block=False,
+            hash_hex="",
+        )
+        ok = await client.submit_share(share, worker_name="worker.rig1", extranonce2_size=4)
+
+        self.assertTrue(ok)
+        self.assertEqual(captured["method"], "mining.submit")
+        self.assertEqual(
+            captured["params"],
+            ["worker.rig1", "job123", "00000001", "5f5e1000", "00abcdef"],
+        )
 
 
 if __name__ == "__main__":
