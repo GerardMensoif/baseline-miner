@@ -198,6 +198,10 @@ def main() -> None:
     logging.getLogger("baseline_miner").info(
         "Native hashing backend: %s", getattr(hashing, "BACKEND", "unknown")
     )
+    logging.getLogger("baseline_miner").info(
+        "If you see lots of rejcected shares, consider upping the min_difficulty on the stratum server"
+    )
+    
 
     try:
         asyncio.run(run(args))
