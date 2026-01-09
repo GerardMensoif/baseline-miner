@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import queue
 import signal
 import time
 
@@ -25,7 +26,10 @@ async def _share_sender(
     stop_event: asyncio.Event,
 ) -> None:
     while client.connected and not stop_event.is_set():
-        share = await asyncio.to_thread(miner.share_queue.get)
+        try:
+            share = await asyncio.to_thread(miner.share_queue.get, True, 0.5)
+        except queue.Empty:
+            continue
         if stop_event.is_set() or not client.connected:
             break
         if miner.current_job_id and share.job_seq != miner.job_seq:
