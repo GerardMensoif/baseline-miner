@@ -77,66 +77,68 @@ async def _stats_loop(miner: Miner, stats: dict[str, int], interval: float, stop
 async def run(args: argparse.Namespace) -> None:
     log = logging.getLogger("baseline_miner")
     stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop_event.set)
-
     worker_name = _build_worker_name(args.address, args.worker)
     miner: Miner | None = None
     stats = {"accepted": 0, "rejected": 0, "blocks": 0}
 
     stats_task: asyncio.Task | None = None
+    client: StratumClient | None = None
 
-    while not stop_event.is_set():
-        client = StratumClient(args.host, args.port)
-        client.on_difficulty = lambda diff: miner and miner.set_difficulty(diff)
-        client.on_job = lambda job: miner and miner.set_job(job)
-        share_task: asyncio.Task | None = None
-        try:
-            await client.connect()
-            log.info("Connected to %s:%s", args.host, args.port)
-            await client.subscribe()
-            await client.authorize(worker_name, args.password)
-            if client.extranonce2_size is None:
-                raise RuntimeError("Missing extranonce2 size")
-            if miner is None or miner.extranonce2_size != client.extranonce2_size:
-                if miner:
-                    miner.stop()
-                miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
-                miner.start()
-                if stats_task:
-                    stats_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await stats_task
-                stats_task = asyncio.create_task(
-                    _stats_loop(miner, stats, args.stats_interval, stop_event),
-                    name="miner-stats",
+    try:
+        while not stop_event.is_set():
+            client = StratumClient(args.host, args.port)
+            client.on_difficulty = lambda diff: miner and miner.set_difficulty(diff)
+            client.on_job = lambda job: miner and miner.set_job(job)
+            share_task: asyncio.Task | None = None
+            try:
+                await client.connect()
+                log.info("Connected to %s:%s", args.host, args.port)
+                await client.subscribe()
+                await client.authorize(worker_name, args.password)
+                if client.extranonce2_size is None:
+                    raise RuntimeError("Missing extranonce2 size")
+                if miner is None or miner.extranonce2_size != client.extranonce2_size:
+                    if miner:
+                        miner.stop()
+                    miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
+                    miner.start()
+                    if stats_task:
+                        stats_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await stats_task
+                    stats_task = asyncio.create_task(
+                        _stats_loop(miner, stats, args.stats_interval, stop_event),
+                        name="miner-stats",
+                    )
+                share_task = asyncio.create_task(
+                    _share_sender(client, miner, worker_name, stats, stop_event),
+                    name="share-sender",
                 )
-            share_task = asyncio.create_task(
-                _share_sender(client, miner, worker_name, stats, stop_event),
-                name="share-sender",
-            )
-            await client.wait_closed()
-        except Exception as exc:
-            log.warning("Disconnected: %s", exc)
-        finally:
-            if share_task:
-                share_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await share_task
-            await client.close()
-            if miner:
-                miner.clear_job()
-        if not stop_event.is_set():
-            await asyncio.sleep(args.reconnect_delay)
-
-    if miner:
-        miner.stop()
-    if stats_task:
-        stats_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await stats_task
+                await client.wait_closed()
+            except Exception as exc:
+                log.warning("Disconnected: %s", exc)
+            finally:
+                if share_task:
+                    share_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await share_task
+                await client.close()
+                if miner:
+                    miner.clear_job()
+            if not stop_event.is_set():
+                await asyncio.sleep(args.reconnect_delay)
+    except KeyboardInterrupt:
+        stop_event.set()
+    finally:
+        if client:
+            with contextlib.suppress(Exception):
+                await client.close()
+        if miner:
+            miner.stop()
+        if stats_task:
+            stats_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stats_task
 
 
 def main() -> None:

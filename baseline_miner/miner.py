@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import os
 import queue
+import signal
 import struct
 import time
 
@@ -39,6 +40,7 @@ def _worker_main(
     hash_counter: mp.Value,
     extranonce2_size: int,
 ) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     share_target = difficulty_to_target_bytes(1.0)
     current_job: MiningJob | None = None
     current_job_id: str | None = None
@@ -119,25 +121,23 @@ def _worker_main(
             matches = scan_hashes(header_prefix, nonce, span, share_target)
             emitted = 0
             for match_nonce, hash_bytes in matches:
-                if emitted >= MAX_SHARES_PER_CHUNK:
+                if stop_event.is_set() or emitted >= MAX_SHARES_PER_CHUNK:
                     break
+                share = Share(
+                    job_id=current_job_id or "",
+                    extranonce2=extranonce2,
+                    ntime=ntime,
+                    nonce=match_nonce,
+                    is_block=hash_bytes <= block_target,
+                    hash_hex=hash_bytes[::-1].hex(),
+                    job_seq=current_job_seq,
+                )
                 try:
-                    share_queue.put(
-                        Share(
-                            job_id=current_job_id or "",
-                            extranonce2=extranonce2,
-                            ntime=ntime,
-                            nonce=match_nonce,
-                            is_block=hash_bytes <= block_target,
-                            hash_hex=hash_bytes[::-1].hex(),
-                            job_seq=current_job_seq,
-                        ),
-                        timeout=0.1,
-                    )
+                    share_queue.put_nowait(share)
                     emitted += 1
                 except queue.Full:
-                    if stop_event.is_set():
-                        break
+                    # If queue is full, drop share to keep hashing responsive.
+                    continue
             nonce += span
         else:
             if header is None:
@@ -147,22 +147,21 @@ def _worker_main(
                 struct.pack_into("<I", header, 76, current_nonce)
                 hash_bytes = sha256d(header)
                 if hash_bytes <= share_target:
+                    share = Share(
+                        job_id=current_job_id or "",
+                        extranonce2=extranonce2,
+                        ntime=ntime,
+                        nonce=current_nonce,
+                        is_block=hash_bytes <= block_target,
+                        hash_hex=hash_bytes[::-1].hex(),
+                        job_seq=current_job_seq,
+                    )
                     try:
-                        share_queue.put(
-                            Share(
-                                job_id=current_job_id or "",
-                                extranonce2=extranonce2,
-                                ntime=ntime,
-                                nonce=current_nonce,
-                                is_block=hash_bytes <= block_target,
-                                hash_hex=hash_bytes[::-1].hex(),
-                                job_seq=current_job_seq,
-                            ),
-                            timeout=0.1,
-                        )
+                        share_queue.put_nowait(share)
                     except queue.Full:
                         if stop_event.is_set():
                             break
+                        continue
             nonce += span
         with hash_counter.get_lock():
             hash_counter.value += span
