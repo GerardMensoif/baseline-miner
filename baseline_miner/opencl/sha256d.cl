@@ -115,12 +115,25 @@ void sha256_compress(uint state[8], const uint block[16]) {
 
 // Compare hash state against target (both as big-endian words)
 // Returns 1 if hash <= target, 0 otherwise
-int hash_le_target(const uint hash[8], const uint target[8]) {
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        if (hash[i] < target[i]) return 1;
-        if (hash[i] > target[i]) return 0;
-    }
+int hash_le_target(const uint hash[8], const uint target0, const uint target1,
+                   const uint target2, const uint target3, const uint target4,
+                   const uint target5, const uint target6, const uint target7) {
+    if (hash[0] < target0) return 1;
+    if (hash[0] > target0) return 0;
+    if (hash[1] < target1) return 1;
+    if (hash[1] > target1) return 0;
+    if (hash[2] < target2) return 1;
+    if (hash[2] > target2) return 0;
+    if (hash[3] < target3) return 1;
+    if (hash[3] > target3) return 0;
+    if (hash[4] < target4) return 1;
+    if (hash[4] > target4) return 0;
+    if (hash[5] < target5) return 1;
+    if (hash[5] > target5) return 0;
+    if (hash[6] < target6) return 1;
+    if (hash[6] > target6) return 0;
+    if (hash[7] < target7) return 1;
+    if (hash[7] > target7) return 0;
     return 1;
 }
 
@@ -215,7 +228,9 @@ __kernel void scan_nonces(
     sha256_compress(state2, hash_block);
 
     // Check if hash meets target
-    if (hash_le_target(state2, target)) {
+    // Load target to private memory to avoid address space issues on Apple OpenCL
+    if (hash_le_target(state2, target[0], target[1], target[2], target[3],
+                       target[4], target[5], target[6], target[7])) {
         // Atomically increment result counter and store result
         uint idx = atomic_inc(result_count);
         if (idx < max_results) {
