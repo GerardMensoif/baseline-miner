@@ -27,6 +27,18 @@ def _build_worker_name(address: str, worker: str | None) -> str:
     return address
 
 
+def _format_hashrate(hashrate: float) -> str:
+    """Format hashrate with appropriate unit (H/s, KH/s, MH/s, GH/s)."""
+    if hashrate >= 1e9:
+        return f"{hashrate / 1e9:.2f} GH/s"
+    elif hashrate >= 1e6:
+        return f"{hashrate / 1e6:.2f} MH/s"
+    elif hashrate >= 1e3:
+        return f"{hashrate / 1e3:.2f} KH/s"
+    else:
+        return f"{hashrate:.2f} H/s"
+
+
 async def _share_sender(
     client: StratumClient,
     miner: Miner,
@@ -88,9 +100,9 @@ async def _stats_loop(miner: Miner, stats: dict[str, int], interval: float, stop
             # Smooth with exponential moving average for more stable display.
             avg_rate = avg_rate * 0.7 + rate * 0.3
         log.info(
-            "Hashrate inst=%.2f H/s avg=%.2f H/s | shares ok=%d rejected=%d blocks=%d",
-            rate,
-            avg_rate,
+            "Hashrate inst=%s avg=%s | shares ok=%d rejected=%d blocks=%d",
+            _format_hashrate(rate),
+            _format_hashrate(avg_rate),
             stats["accepted"],
             stats["rejected"],
             stats["blocks"],
