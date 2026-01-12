@@ -11,6 +11,17 @@ requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [{name = "crosschainer"}]
 
+[project.optional-dependencies]
+gpu = [
+    "pyopencl>=2022.1",
+    "numpy>=1.20.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pyopencl>=2022.1",
+    "numpy>=1.20.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/Baseline-Blockchain/baseline-miner"
 
