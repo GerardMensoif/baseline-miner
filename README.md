@@ -5,7 +5,7 @@ Open source Stratum miner for Baseline pools, optimized for CPU and GPU throughp
 ## Features
 - Baseline Stratum client (subscribe/authorize/notify)
 - Multi-process SHA256d CPU miner (one worker per process)
-- **GPU mining support via OpenCL** (AMD, NVIDIA, Intel GPUs)
+- **GPU mining support via OpenCL** (AMD, NVIDIA, Intel, Apple Silicon)
 - C SHA256d backend (portable by default; optimized scan path)
 - Vardiff `mining.set_difficulty` support
 - Clean job handling and share validation
@@ -13,25 +13,13 @@ Open source Stratum miner for Baseline pools, optimized for CPU and GPU throughp
 ## Requirements
 - Python 3.9+
 - A C compiler (builds the portable hashing extension)
-
-### GPU Mining (Optional)
-- OpenCL runtime and drivers
-- PyOpenCL and NumPy (`pip install pyopencl numpy`)
+- OpenCL runtime and drivers (for GPU mining)
 
 ## Install
-
-### CPU Mining Only
 ```
 python -m venv .venv
 . .venv/bin/activate
 pip install -e .
-```
-
-### With GPU Support
-```
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[gpu]"
 ```
 
 ### Optional: CPU-specific build flags
