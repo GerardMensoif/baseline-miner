@@ -12,6 +12,14 @@ from .miner import Miner
 from .stratum import StratumClient
 from . import hashing
 
+try:
+    from .gpu import HAS_OPENCL, list_devices as list_gpu_devices
+    from .gpu_miner import GPUMiner
+except ImportError:
+    HAS_OPENCL = False
+    list_gpu_devices = lambda: []
+    GPUMiner = None
+
 
 def _build_worker_name(address: str, worker: str | None) -> str:
     if worker:
@@ -95,10 +103,11 @@ async def run(args: argparse.Namespace) -> None:
     log = logging.getLogger("baseline_miner")
     stop_event = asyncio.Event()
     worker_name = _build_worker_name(args.address, args.worker)
-    miner: Miner | None = None
+    miner: Miner | GPUMiner | None = None
     stats = {"accepted": 0, "rejected": 0, "blocks": 0}
     latest_difficulty: float | None = None
     latest_job: object | None = None
+    use_gpu = getattr(args, 'gpu', False)
 
     stats_task: asyncio.Task | None = None
     client: StratumClient | None = None
@@ -133,7 +142,18 @@ async def run(args: argparse.Namespace) -> None:
                 if miner is None or miner.extranonce2_size != client.extranonce2_size:
                     if miner:
                         miner.stop()
-                    miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
+                    if use_gpu:
+                        if GPUMiner is None:
+                            raise RuntimeError("GPU support not available. Install pyopencl and numpy.")
+                        miner = GPUMiner(
+                            extranonce2_size=client.extranonce2_size,
+                            platform_idx=getattr(args, 'gpu_platform', 0),
+                            device_idx=getattr(args, 'gpu_device', 0),
+                        )
+                        log.info("Using GPU mining")
+                    else:
+                        miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
+                        log.info("Using CPU mining with %d threads", args.threads)
                     miner.start()
                 if latest_difficulty is not None:
                     miner.set_difficulty(latest_difficulty)
@@ -178,30 +198,94 @@ async def run(args: argparse.Namespace) -> None:
                 await stats_task
 
 
+def _list_devices_cmd() -> None:
+    """List available GPU devices."""
+    if not HAS_OPENCL:
+        print("OpenCL not available. Install pyopencl and numpy for GPU support.")
+        return
+    
+    devices = list_gpu_devices()
+    if not devices:
+        print("No OpenCL GPU devices found.")
+        return
+    
+    print("Available OpenCL GPU devices:")
+    for dev in devices:
+        print(f"  {dev}")
+    print()
+    print("Use --gpu --gpu-platform=P --gpu-device=D to select a device")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Baseline Stratum CPU miner")
+    parser = argparse.ArgumentParser(description="Baseline Stratum miner (CPU/GPU)")
+    
+    # Subcommands
+    subparsers = parser.add_subparsers(dest="command")
+    
+    # list-devices subcommand
+    subparsers.add_parser("list-devices", help="List available GPU devices")
+    
+    # Main miner arguments
     parser.add_argument("--host", default=os.environ.get("BASELINE_STRATUM_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BASELINE_STRATUM_PORT", "3333")))
-    parser.add_argument("--address", required=True, help="Baseline payout address")
+    parser.add_argument("--address", help="Baseline payout address")
     parser.add_argument("--worker", default=os.environ.get("BASELINE_WORKER"))
     parser.add_argument("--password", default=os.environ.get("BASELINE_PASSWORD", ""))
-    parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--threads", type=int, default=os.cpu_count() or 1,
+                        help="Number of CPU threads (CPU mining only)")
     parser.add_argument("--stats-interval", type=float, default=10.0)
     parser.add_argument("--reconnect-delay", type=float, default=5.0)
     parser.add_argument("--log-level", default=os.environ.get("BASELINE_LOG_LEVEL", "info"))
+    
+    # GPU arguments
+    parser.add_argument("--gpu", action="store_true", 
+                        help="Enable GPU mining using OpenCL")
+    parser.add_argument("--gpu-platform", type=int, default=0,
+                        help="OpenCL platform index (default: 0)")
+    parser.add_argument("--gpu-device", type=int, default=0,
+                        help="GPU device index within platform (default: 0)")
+    
     args = parser.parse_args()
+    
+    # Handle subcommands
+    if args.command == "list-devices":
+        _list_devices_cmd()
+        return
+    
+    # Regular mining mode - address is required
+    if not args.address:
+        parser.error("--address is required for mining")
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logging.getLogger("baseline_miner").info(
-        "Native hashing backend: %s", getattr(hashing, "BACKEND", "unknown")
-    )
-    logging.getLogger("baseline_miner").info(
+    log = logging.getLogger("baseline_miner")
+    
+    if args.gpu:
+        if not HAS_OPENCL:
+            log.error("GPU mining requested but OpenCL not available.")
+            log.error("Install with: pip install pyopencl numpy")
+            return
+        devices = list_gpu_devices()
+        if not devices:
+            log.error("No OpenCL GPU devices found.")
+            return
+        if args.gpu_platform >= len(set(d.platform_idx for d in devices)):
+            log.error("Invalid GPU platform index %d", args.gpu_platform)
+            return
+        platform_devices = [d for d in devices if d.platform_idx == args.gpu_platform]
+        if args.gpu_device >= len(platform_devices):
+            log.error("Invalid GPU device index %d", args.gpu_device)
+            return
+        selected = platform_devices[args.gpu_device]
+        log.info("Selected GPU: %s", selected)
+    else:
+        log.info("Native hashing backend: %s", getattr(hashing, "BACKEND", "unknown"))
+    
+    log.info(
         "If you see lots of rejected shares, consider upping the min_difficulty on the stratum server"
     )
-    
 
     try:
         asyncio.run(run(args))
