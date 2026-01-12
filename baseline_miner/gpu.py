@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.resources
 import struct
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Any
 
@@ -133,6 +134,7 @@ class GPUHasher:
         self._ctx: Optional[cl.Context] = None
         self._queue: Optional[cl.CommandQueue] = None
         self._program: Optional[cl.Program] = None
+        self._kernel: Optional[cl.Kernel] = None  # Cached kernel to avoid repeated retrieval
         self._initialized = False
         
         # Buffers
@@ -173,9 +175,14 @@ class GPUHasher:
         self._ctx = cl.Context([device])
         self._queue = cl.CommandQueue(self._ctx)
         
-        # Compile kernel
+        # Compile kernel (suppress pyopencl cache warnings)
         kernel_source = _load_kernel_source()
-        self._program = cl.Program(self._ctx, kernel_source).build()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._program = cl.Program(self._ctx, kernel_source).build()
+        
+        # Cache kernel instance to avoid repeated retrieval warning
+        self._kernel = cl.Kernel(self._program, "scan_nonces")
         
         # Allocate buffers
         mf = cl.mem_flags
@@ -317,11 +324,8 @@ class GPUHasher:
             zero = np.array([0], dtype=np.uint32)
             cl.enqueue_copy(self._queue, self._result_count_buf, zero)
             
-            # Run kernel
-            self._program.scan_nonces(
-                self._queue,
-                (actual_global,),
-                (self.local_size,),
+            # Run kernel using cached kernel instance
+            self._kernel.set_args(
                 self._midstate_buf,
                 self._block2_buf,
                 self._target_buf,
@@ -330,6 +334,12 @@ class GPUHasher:
                 self._result_hashes_buf,
                 self._result_count_buf,
                 np.uint32(self.MAX_RESULTS),
+            )
+            cl.enqueue_nd_range_kernel(
+                self._queue,
+                self._kernel,
+                (actual_global,),
+                (self.local_size,),
             )
             
             # Read results
@@ -363,6 +373,12 @@ class GPUHasher:
         
         Modifies state in-place.
         """
+        # Suppress overflow warnings - overflow is expected in SHA256 (modular arithmetic)
+        with np.errstate(over='ignore'):
+            self._sha256_compress_numpy_impl(state, block)
+    
+    def _sha256_compress_numpy_impl(self, state: np.ndarray, block: np.ndarray) -> None:
+        """Internal SHA256 compression implementation."""
         K = np.array([
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
             0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
