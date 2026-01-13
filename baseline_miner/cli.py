@@ -111,7 +111,7 @@ async def _stats_loop(miner: Miner, stats: dict[str, int], interval: float, stop
         last_time = now
 
 
-async def run(args: argparse.Namespace) -> None:
+async def run(args: argparse.Namespace, gpu_devices_list: list[tuple[int, int]] | None = None) -> None:
     log = logging.getLogger("baseline_miner")
     stop_event = asyncio.Event()
     worker_name = _build_worker_name(args.address, args.worker)
@@ -157,12 +157,22 @@ async def run(args: argparse.Namespace) -> None:
                     if use_gpu:
                         if GPUMiner is None:
                             raise RuntimeError("GPU support not available. Install pyopencl and numpy.")
+
+                        gpu_kwargs = {}
+                        if hasattr(args, 'gpu_batch_size') and args.gpu_batch_size:
+                            gpu_kwargs['batch_size'] = args.gpu_batch_size
+                        if hasattr(args, 'gpu_global_size') and args.gpu_global_size:
+                            gpu_kwargs['global_size'] = args.gpu_global_size
+                        if hasattr(args, 'gpu_local_size') and args.gpu_local_size:
+                            gpu_kwargs['local_size'] = args.gpu_local_size
+
                         miner = GPUMiner(
                             extranonce2_size=client.extranonce2_size,
-                            platform_idx=getattr(args, 'gpu_platform', 0),
-                            device_idx=getattr(args, 'gpu_device', 0),
+                            gpu_devices=gpu_devices_list,
+                            **gpu_kwargs
                         )
-                        log.info("Using GPU mining")
+                        gpu_count = len(gpu_devices_list) if gpu_devices_list else 1
+                        log.info("Using GPU mining with %d GPU(s)", gpu_count)
                     else:
                         miner = Miner(threads=args.threads, extranonce2_size=client.extranonce2_size)
                         log.info("Using CPU mining with %d threads", args.threads)
@@ -250,12 +260,22 @@ def main() -> None:
     parser.add_argument("--log-level", default=os.environ.get("BASELINE_LOG_LEVEL", "info"))
     
     # GPU arguments
-    parser.add_argument("--gpu", action="store_true", 
+    parser.add_argument("--gpu", action="store_true",
                         help="Enable GPU mining using OpenCL")
+    parser.add_argument("--gpu-all", action="store_true",
+                        help="Use all available GPUs")
+    parser.add_argument("--gpu-devices", type=str,
+                        help="Comma-separated list of GPU indices (e.g., '0,1,2' or '0:0,0:1' for platform:device)")
     parser.add_argument("--gpu-platform", type=int, default=0,
-                        help="OpenCL platform index (default: 0)")
+                        help="OpenCL platform index (default: 0, ignored if --gpu-all or --gpu-devices is used)")
     parser.add_argument("--gpu-device", type=int, default=0,
-                        help="GPU device index within platform (default: 0)")
+                        help="GPU device index within platform (default: 0, ignored if --gpu-all or --gpu-devices is used)")
+    parser.add_argument("--gpu-batch-size", type=int,
+                        help="GPU batch size in hashes (default: 16M, try 32M or 64M for high-end GPUs)")
+    parser.add_argument("--gpu-global-size", type=int,
+                        help="OpenCL global work size (default: 16M, must match batch-size for best performance)")
+    parser.add_argument("--gpu-local-size", type=int,
+                        help="OpenCL local work size (default: 256)")
     
     args = parser.parse_args()
     
@@ -274,6 +294,7 @@ def main() -> None:
     )
     log = logging.getLogger("baseline_miner")
     
+    gpu_devices_list = None
     if args.gpu:
         if not HAS_OPENCL:
             log.error("GPU mining requested but OpenCL not available.")
@@ -283,15 +304,60 @@ def main() -> None:
         if not devices:
             log.error("No OpenCL GPU devices found.")
             return
-        if args.gpu_platform >= len(set(d.platform_idx for d in devices)):
-            log.error("Invalid GPU platform index %d", args.gpu_platform)
-            return
-        platform_devices = [d for d in devices if d.platform_idx == args.gpu_platform]
-        if args.gpu_device >= len(platform_devices):
-            log.error("Invalid GPU device index %d", args.gpu_device)
-            return
-        selected = platform_devices[args.gpu_device]
-        log.info("Selected GPU: %s", selected)
+
+        # Determine which GPUs to use
+        if args.gpu_all:
+            # Use all available GPUs
+            gpu_devices_list = [(d.platform_idx, d.device_idx) for d in devices]
+            log.info("Selected all %d GPUs:", len(gpu_devices_list))
+            for d in devices:
+                log.info("  %s", d)
+        elif args.gpu_devices:
+            # Parse comma-separated list of GPU indices
+            gpu_devices_list = []
+            for spec in args.gpu_devices.split(','):
+                spec = spec.strip()
+                if ':' in spec:
+                    # Format: platform:device
+                    parts = spec.split(':')
+                    if len(parts) != 2:
+                        log.error("Invalid GPU spec '%s'. Use format 'platform:device' or just 'device'", spec)
+                        return
+                    try:
+                        platform_idx = int(parts[0])
+                        device_idx = int(parts[1])
+                    except ValueError:
+                        log.error("Invalid GPU spec '%s'. Indices must be integers", spec)
+                        return
+                else:
+                    # Format: device (use default platform)
+                    try:
+                        platform_idx = args.gpu_platform
+                        device_idx = int(spec)
+                    except ValueError:
+                        log.error("Invalid GPU device index '%s'", spec)
+                        return
+
+                # Validate GPU exists
+                matching = [d for d in devices if d.platform_idx == platform_idx and d.device_idx == device_idx]
+                if not matching:
+                    log.error("GPU %d:%d not found", platform_idx, device_idx)
+                    return
+
+                gpu_devices_list.append((platform_idx, device_idx))
+                log.info("Selected GPU: %s", matching[0])
+        else:
+            # Use single GPU specified by --gpu-platform and --gpu-device
+            if args.gpu_platform >= len(set(d.platform_idx for d in devices)):
+                log.error("Invalid GPU platform index %d", args.gpu_platform)
+                return
+            platform_devices = [d for d in devices if d.platform_idx == args.gpu_platform]
+            if args.gpu_device >= len(platform_devices):
+                log.error("Invalid GPU device index %d", args.gpu_device)
+                return
+            selected = platform_devices[args.gpu_device]
+            gpu_devices_list = [(args.gpu_platform, args.gpu_device)]
+            log.info("Selected GPU: %s", selected)
     else:
         log.info("Native hashing backend: %s", getattr(hashing, "BACKEND", "unknown"))
     
@@ -300,7 +366,7 @@ def main() -> None:
     )
 
     try:
-        asyncio.run(run(args))
+        asyncio.run(run(args, gpu_devices_list))
     except KeyboardInterrupt:
         pass
 

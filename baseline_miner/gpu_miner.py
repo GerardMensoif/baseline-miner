@@ -58,6 +58,8 @@ def _gpu_worker_main(
     counter_lock: threading.Lock,
     extranonce2_size: int,
     batch_size: int,
+    worker_id: int,
+    worker_count: int,
 ) -> None:
     """GPU worker thread main function."""
     share_target = difficulty_to_target_bytes(1.0)
@@ -67,7 +69,9 @@ def _gpu_worker_main(
     ntime_base = 0
     block_target = target_to_bytes(1)
     max_extranonce2 = 1 << (extranonce2_size * 8)
-    extranonce2 = 0
+    # Distribute nonce space across workers
+    step = worker_count % max_extranonce2 or 1
+    extranonce2 = worker_id % max_extranonce2
     nonce = 0
     last_ntime_update = 0.0
     rebuild_header = False
@@ -88,7 +92,7 @@ def _gpu_worker_main(
                 current_job_id = current_job.job_id
                 ntime_base = current_job.ntime
                 block_target = target_to_bytes(compact_to_target(current_job.bits))
-                extranonce2 = 0
+                extranonce2 = worker_id % max_extranonce2
                 nonce = 0
                 rebuild_header = True
                 header_prefix = b""
@@ -164,35 +168,34 @@ def _gpu_worker_main(
         
         nonce += span
         if nonce >= NONCE_LIMIT:
-            extranonce2 = (extranonce2 + 1) % max_extranonce2
+            extranonce2 = (extranonce2 + step) % max_extranonce2
             nonce = 0
             rebuild_header = True
 
 
 class GPUMiner:
     """GPU-based miner using OpenCL.
-    
+
     This class provides a similar interface to the CPU Miner class,
     making it easy to switch between CPU and GPU mining.
+    Supports multiple GPUs by creating a worker thread per GPU.
     """
-    
+
     DEFAULT_BATCH_SIZE = 1 << 24  # 16M hashes per batch
-    
+
     def __init__(
         self,
         extranonce2_size: int = 4,
-        platform_idx: int = 0,
-        device_idx: int = 0,
+        gpu_devices: Optional[list[tuple[int, int]]] = None,
         batch_size: Optional[int] = None,
         global_size: Optional[int] = None,
         local_size: Optional[int] = None,
     ):
         """Initialize the GPU miner.
-        
+
         Args:
             extranonce2_size: Size of extranonce2 in bytes
-            platform_idx: OpenCL platform index
-            device_idx: Device index within platform
+            gpu_devices: List of (platform_idx, device_idx) tuples. If None, uses GPU 0:0
             batch_size: Number of nonces per mining batch
             global_size: OpenCL global work size
             local_size: OpenCL local work size
@@ -201,22 +204,21 @@ class GPUMiner:
             raise RuntimeError(
                 "PyOpenCL is not installed. Install with: pip install pyopencl numpy"
             )
-        
+
         self.extranonce2_size = extranonce2_size
-        self.platform_idx = platform_idx
-        self.device_idx = device_idx
+        self.gpu_devices = gpu_devices or [(0, 0)]
         self.batch_size = batch_size or self.DEFAULT_BATCH_SIZE
         self.global_size = global_size
         self.local_size = local_size
-        
-        self._hasher: Optional[GPUHasher] = None
-        self._worker_thread: Optional[threading.Thread] = None
-        self._job_queue: queue.Queue = queue.Queue()
+
+        self._hashers: list[Optional[GPUHasher]] = []
+        self._worker_threads: list[Optional[threading.Thread]] = []
+        self._job_queues: list[queue.Queue] = []
         self._share_queue: queue.Queue = queue.Queue(maxsize=10000)
         self._stop_event = threading.Event()
-        self._hash_counter = [0]  # Use list for mutability
-        self._counter_lock = threading.Lock()
-        
+        self._hash_counters: list[list[int]] = []
+        self._counter_locks: list[threading.Lock] = []
+
         self.current_job_id: Optional[str] = None
         self.job_seq: int = 0
         self.difficulty: float = 1.0
@@ -226,59 +228,92 @@ class GPUMiner:
     def share_queue(self) -> queue.Queue:
         """Queue of found shares."""
         return self._share_queue
-    
+
     def start(self) -> None:
-        """Start the GPU mining thread."""
-        if self._worker_thread is not None and self._worker_thread.is_alive():
+        """Start GPU mining threads (one per GPU)."""
+        if self._worker_threads and any(t and t.is_alive() for t in self._worker_threads):
             return
-        
-        # Initialize hasher
-        self._hasher = GPUHasher(
-            platform_idx=self.platform_idx,
-            device_idx=self.device_idx,
-            global_size=self.global_size,
-            local_size=self.local_size,
-        )
-        self._hasher.initialize()
-        
+
         # Reset state
         self._stop_event.clear()
-        self._hash_counter[0] = 0
-        
-        # Start worker thread
-        self._worker_thread = threading.Thread(
-            target=_gpu_worker_main,
-            args=(
-                self._hasher,
-                self._job_queue,
-                self._share_queue,
-                self._stop_event,
-                self._hash_counter,
-                self._counter_lock,
-                self.extranonce2_size,
-                self.batch_size,
-            ),
-            daemon=True,
-        )
-        self._worker_thread.start()
+        self._hashers.clear()
+        self._worker_threads.clear()
+        self._job_queues.clear()
+        self._hash_counters.clear()
+        self._counter_locks.clear()
+
+        # Start one worker thread per GPU
+        for gpu_idx, (platform_idx, device_idx) in enumerate(self.gpu_devices):
+            # Initialize hasher for this GPU
+            try:
+                hasher = GPUHasher(
+                    platform_idx=platform_idx,
+                    device_idx=device_idx,
+                    global_size=self.global_size,
+                    local_size=self.local_size,
+                )
+                hasher.initialize()
+            except Exception as e:
+                print(f"Failed to initialize GPU {platform_idx}:{device_idx}: {e}")
+                continue
+
+            # Create job queue and counters for this worker
+            job_queue = queue.Queue()
+            hash_counter = [0]
+            counter_lock = threading.Lock()
+
+            # Start worker thread
+            worker_thread = threading.Thread(
+                target=_gpu_worker_main,
+                args=(
+                    hasher,
+                    job_queue,
+                    self._share_queue,
+                    self._stop_event,
+                    hash_counter,
+                    counter_lock,
+                    self.extranonce2_size,
+                    self.batch_size,
+                    gpu_idx,  # worker_id
+                    len(self.gpu_devices),  # worker_count
+                ),
+                daemon=True,
+                name=f"GPU-{platform_idx}:{device_idx}",
+            )
+            worker_thread.start()
+
+            self._hashers.append(hasher)
+            self._worker_threads.append(worker_thread)
+            self._job_queues.append(job_queue)
+            self._hash_counters.append(hash_counter)
+            self._counter_locks.append(counter_lock)
     
     def stop(self) -> None:
-        """Stop the GPU mining thread."""
+        """Stop all GPU mining threads."""
         self._stop_event.set()
-        self._job_queue.put(("clear", None))
-        
-        if self._worker_thread is not None:
-            self._worker_thread.join(timeout=5)
-            self._worker_thread = None
-        
-        if self._hasher is not None:
-            self._hasher.release()
-            self._hasher = None
-    
+
+        # Signal all workers to stop
+        for job_queue in self._job_queues:
+            job_queue.put(("clear", None))
+
+        # Wait for all threads to finish
+        for worker_thread in self._worker_threads:
+            if worker_thread is not None:
+                worker_thread.join(timeout=5)
+
+        # Release all hashers
+        for hasher in self._hashers:
+            if hasher is not None:
+                hasher.release()
+
+        self._worker_threads.clear()
+        self._hashers.clear()
+
     def clear_job(self) -> None:
-        """Clear the current mining job."""
-        self._job_queue.put(("clear", None))
-    
+        """Clear the current mining job on all GPUs."""
+        for job_queue in self._job_queues:
+            job_queue.put(("clear", None))
+
     def _drain_shares(self) -> None:
         """Drain all pending shares from the queue."""
         while True:
@@ -286,57 +321,59 @@ class GPUMiner:
                 self._share_queue.get_nowait()
             except queue.Empty:
                 break
-    
+
     def set_difficulty(self, difficulty: float) -> None:
-        """Set the mining difficulty."""
+        """Set the mining difficulty on all GPUs."""
         previous = self.difficulty
         self.difficulty = float(difficulty)
         self.share_target = difficulty_to_target_bytes(self.difficulty)
-        self._job_queue.put(("diff", difficulty))
+        for job_queue in self._job_queues:
+            job_queue.put(("diff", difficulty))
         if self.difficulty > previous:
             self._drain_shares()
-    
+
     def snapshot_hashes(self) -> int:
-        """Get the total number of hashes computed."""
-        with self._counter_lock:
-            return self._hash_counter[0]
-    
+        """Get the total number of hashes computed across all GPUs."""
+        total = 0
+        for counter, lock in zip(self._hash_counters, self._counter_locks):
+            with lock:
+                total += counter[0]
+        return total
+
     def set_job(self, job: MiningJob) -> None:
-        """Set a new mining job."""
+        """Set a new mining job on all GPUs."""
         if job.clean:
             self.clear_job()
             self._drain_shares()
         self.job_seq += 1
         self.current_job_id = job.job_id
-        self._job_queue.put(("job", (self.job_seq, job)))
+        for job_queue in self._job_queues:
+            job_queue.put(("job", (self.job_seq, job)))
 
 
 def get_miner(
     gpu: bool = False,
     threads: Optional[int] = None,
     extranonce2_size: int = 4,
-    platform_idx: int = 0,
-    device_idx: int = 0,
+    gpu_devices: Optional[list[tuple[int, int]]] = None,
     **kwargs,
 ):
     """Factory function to get either a CPU or GPU miner.
-    
+
     Args:
         gpu: If True, return a GPUMiner; otherwise return CPU Miner
         threads: Number of CPU threads (CPU miner only)
         extranonce2_size: Size of extranonce2 in bytes
-        platform_idx: OpenCL platform index (GPU miner only)
-        device_idx: Device index (GPU miner only)
+        gpu_devices: List of (platform_idx, device_idx) tuples (GPU miner only)
         **kwargs: Additional arguments passed to miner constructor
-    
+
     Returns:
         Either a GPUMiner or CPU Miner instance
     """
     if gpu:
         return GPUMiner(
             extranonce2_size=extranonce2_size,
-            platform_idx=platform_idx,
-            device_idx=device_idx,
+            gpu_devices=gpu_devices,
             **kwargs,
         )
     else:

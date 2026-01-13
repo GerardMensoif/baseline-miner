@@ -99,8 +99,8 @@ class GPUHasher:
     methods for scanning nonces on the GPU.
     """
     
-    # Default work sizes
-    DEFAULT_GLOBAL_SIZE = 1 << 20  # 1M work items per batch
+    # Default work sizes - optimized for modern GPUs
+    DEFAULT_GLOBAL_SIZE = 1 << 24  # 16M work items per batch (matches batch_size)
     DEFAULT_LOCAL_SIZE = 256
     MAX_RESULTS = 1024
     
